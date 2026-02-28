@@ -1009,18 +1009,17 @@ STRICT CLUSTERING & ANTI-HALLUCINATION RULES:
 4. If a tool returns "Clustering has not been performed", your response must be to guide the user to run it.
 
 BREVITY & STABILITY RULES (CRITICAL):
-1. Groq models fail on very long tool inputs. KEEP YOUR FINAL ANSWER CONCISE.
-2. Do not repeat every single number from the tool output in the `final_answer`. 
-3. Summarize the key takeaway and refer the user to the "Direct Answer" or "Chart" above for details.
-4. If a tool call succeeded (like `run_clustering`), your `final_answer` should just be a 2-3 sentence summary of the main finding.
-5. Use maximum 3-4 bullet points in `final_answer`.
+1. Groq models crash if your tool calls are too long. YOUR final_answer MUST BE EXTREMELY SHORT.
+2. DO NOT repeat statistics or details about the clusters in your final_answer! The user already sees the charts above.
+3. In final_answer, just say: "I have analysed the data. The charts and metrics are shown above."
+4. If a tool call succeeded, do NOT summarize the tables. Limit final_answer to 2 brief sentences max.
 
 GENERAL RULES:
 1. ALWAYS fetch data using a tool first. Never answer without data.
 2. NEVER use the clustering tool if a target column or prediction is requested (use classification).
 3. NEVER use the classification tool for general grouping/segments (use clustering).
 4. Use ONLY numbers from tool results. Do not invent statistics.
-5. Write your final response in clear plain English with bullet points.
+5. Write your final response in clear plain English with bullet points if needed.
 6. Never output Python code or internal thinking sections.
 7. If no dataset is loaded, tell the user to upload a CSV from the sidebar.
 """
@@ -1055,8 +1054,8 @@ def run_agent(prompt: str, model_id: str, api_key: str) -> str:
                 return (f"WARNING: Rate limit reached. Please wait ~{ws}s and try again, "
                         "or switch to a different model in the sidebar.")
         except Exception as e:
-            err = str(e)
-            if "tool_use_failed" in err.lower():
+            err = repr(e) + str(e)
+            if any(x in err.lower() for x in ["tool_use_failed", "failed_generation", "litellm.badrequesterror", "groqexception"]):
                 return ("Analysis complete! (Note: The detailed text summary was cut off by the AI size limit, "
                         "but you can view all the charts and metrics generated above.)")
             if "charmap" in err.lower() or "codec" in err.lower():

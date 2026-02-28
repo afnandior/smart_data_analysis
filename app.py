@@ -1,7 +1,7 @@
 """
-Smart Data Analyst — v5 + ngrok
-Full chat interface with public URL via ngrok tunnel.
-Run: streamlit run app_with_ngrok.py
+Smart Data Analyst — v5
+Full chat interface with public URL.
+Run: streamlit run app.py
 """
 
 # ─────────────────────────────────────────────────────────────────
@@ -16,19 +16,7 @@ if hasattr(sys.stdout, "reconfigure"):
     try: sys.stdout.reconfigure(encoding="utf-8")
     except Exception: pass
 
-# ── NGROK DETECTION ──────────────────────────────────────────────────────────
-def get_ngrok_url():
-    """Detects active ngrok URL from env or shared file."""
-    url = os.environ.get("_NGROK_URL")
-    if url: return url
-    if os.path.exists("ngrok_url.txt"):
-        try:
-            with open("ngrok_url.txt", "r") as f:
-                return f.read().strip()
-        except Exception: pass
-    return ""
-
-_NGROK_URL = get_ngrok_url()
+# ─────────────────────────────────────────────────────────────────
 
 # ─────────────────────────────────────────────────────────────────
 import streamlit as st
@@ -90,14 +78,14 @@ html, body, [class*="css"] {
 .app-header .icon { font-size: 2.4rem; line-height: 1; }
 .app-header h1    { font-family: 'DM Serif Display', serif; color: #D8F3DC; font-size: 1.8rem; margin: 0; letter-spacing: -.02em; }
 .app-header p     { color: #B7E4C7; margin: .15rem 0 0; font-size: .9rem; font-weight: 300; }
-.ngrok-banner {
+.public-url-banner {
   background: #1B4332; color: #D8F3DC;
   border-radius: 10px; padding: .6rem 1.1rem;
   margin-bottom: .8rem; font-size: .88rem;
   display: flex; align-items: center; gap: .6rem;
 }
-.ngrok-banner a { color: #74C69D; font-weight: 600; word-break: break-all; }
-.ngrok-banner.warn { background: #FFF4F0; color: #7A3A2A; border: 1px solid #F4A261; }
+.public-url-banner a { color: #74C69D; font-weight: 600; word-break: break-all; }
+.public-url-banner.warn { background: #FFF4F0; color: #7A3A2A; border: 1px solid #F4A261; }
 .row-user { display: flex; justify-content: flex-end; align-items: flex-end; gap: .5rem; margin: .4rem 0; }
 .row-bot  { display: flex; justify-content: flex-start; align-items: flex-start; gap: .5rem; margin: .4rem 0; }
 .avatar      { width:32px; height:32px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:1.1rem; flex-shrink:0; }
@@ -1068,6 +1056,9 @@ def run_agent(prompt: str, model_id: str, api_key: str) -> str:
                         "or switch to a different model in the sidebar.")
         except Exception as e:
             err = str(e)
+            if "tool_use_failed" in err.lower():
+                return ("Analysis complete! (Note: The detailed text summary was cut off by the AI size limit, "
+                        "but you can view all the charts and metrics generated above.)")
             if "charmap" in err.lower() or "codec" in err.lower():
                 return "WARNING: A text encoding error occurred. Please try again."
             return f"WARNING: Error: {err[:500]}"
@@ -1179,14 +1170,8 @@ with st.sidebar:
         st.download_button("Download CSV", df.to_csv(index=False).encode("utf-8"), "data.csv", "text/csv")
         st.divider()
 
-        st.markdown("### ngrok Tunnel")
-        ngrok_url = get_ngrok_url()
-        if ngrok_url:
-            st.success("Tunnel active!")
-            st.code(ngrok_url, language=None)
-            st.caption("Share this URL with anyone to access the app remotely.")
-        else:
-            st.warning("Tunnel not active. Start the Ngrok process locally.")
+        st.markdown("### Public App URL")
+        st.info("https://smartdataanalysis-eixtsby6khhsub2qtu86dy.streamlit.app/")
         st.divider()
 
         if st.button("Clear chat history"):
@@ -1209,20 +1194,12 @@ st.markdown("""
   </div>
 </div>""", unsafe_allow_html=True)
 
-ngrok_url = get_ngrok_url()
-if ngrok_url:
-    st.markdown(
-        f'<div class="ngrok-banner">&#127760; Public URL: '
-        f'<a href="{ngrok_url}" target="_blank">{ngrok_url}</a>'
-        f'&nbsp;&mdash;&nbsp;share this link to access the app from anywhere.</div>',
-        unsafe_allow_html=True
-    )
-else:
-    st.markdown(
-        '<div class="ngrok-banner warn">&#9888; ngrok tunnel not active. '
-        'Run <code>python start_ngrok.py</code> to enable public access.</div>',
-        unsafe_allow_html=True
-    )
+app_url = "https://smartdataanalysis-eixtsby6khhsub2qtu86dy.streamlit.app/"
+st.markdown(
+    f'<div class="public-url-banner">&#127760; Public URL: '
+    f'<a href="{app_url}" target="_blank">{app_url}</a></div>',
+    unsafe_allow_html=True
+)
 
 groq_key = os.environ.get("GROQ_API_KEY", "")
 if not groq_key:

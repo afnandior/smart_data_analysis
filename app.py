@@ -1,7 +1,7 @@
 """
-Smart Data Analyst — v5
+Smart Data Analyst 
 Full chat interface with public URL.
-Run: streamlit run app.py
+SPEED OPTIMIZATIONS: max_steps=2, reduced sampling, faster charts
 """
 
 # ─────────────────────────────────────────────────────────────────
@@ -247,7 +247,7 @@ def build_data_context(df: pd.DataFrame) -> str:
             pass
     if len(num_cols) >= 2 and len(num_cols) < 50:
         try:
-            sample_df = df if len(df) < 5000 else df.sample(5000, random_state=42)
+            sample_df = df if len(df) < 2000 else df.sample(2000, random_state=42)
             corr = sample_df[num_cols].corr().abs()
             pairs = (
                 corr.where(np.triu(np.ones(corr.shape), k=1).astype(bool))
@@ -278,6 +278,125 @@ def clean_output(text: str) -> str:
     text  = "\n".join(lines)
     text  = re.sub(r"\n{3,}", "\n\n", text).strip()
     return text if len(text) > 15 else "Analysis complete. See the chart above."
+
+
+# ─────────────────────────────────────────────────────────────────
+#  *** NEW: PRE-ROUTING FUNCTION ***
+#  Called BEFORE the agent for follow-up questions on existing clusters
+#  This prevents the LLM from hallucinating when clustering is already done
+# ─────────────────────────────────────────────────────────────────
+
+def direct_cluster_analysis(question: str) -> str | None:
+    """
+    Intercepts follow-up questions when clustering already exists in session.
+    Returns a verified answer directly from Python — no LLM hallucination possible.
+    Returns None if this function cannot answer the question (pass to agent instead).
+    """
+    df = st.session_state.get("data")
+    if df is None or "_cluster_tag" not in df.columns:
+        return None  # No clustering done yet — let agent handle it
+
+    q = question.lower()
+    cluster_followup_keywords = [
+        "cluster", "segment", "group", "highest", "lowest", "cost", "revenue",
+        "which cluster", "what cluster", "compare cluster", "rank cluster",
+        "most expensive", "least expensive", "operational", "profit", "loss"
+    ]
+    if not any(kw in q for kw in cluster_followup_keywords):
+        return None  # Not a cluster follow-up question
+
+    # ── Build verified stats from actual data ──────────────────────────────
+    num_cols = [c for c in df.select_dtypes(include=[np.number]).columns
+                if c != "_cluster_tag"]
+    labels   = df["_cluster_tag"]
+    unique_labels = sorted([l for l in labels.unique() if l >= 0])
+
+    # Compute per-cluster means
+    profile = df.groupby("_cluster_tag")[num_cols].mean()
+    counts  = df["_cluster_tag"].value_counts()
+
+    # ── Detect which columns the user is asking about ─────────────────────
+    asked_cols = [c for c in num_cols if c.lower() in q]
+    if not asked_cols:
+        # Try partial match
+        asked_cols = [c for c in num_cols
+                      if any(word in c.lower() for word in q.split()
+                             if len(word) > 3)]
+    if not asked_cols:
+        asked_cols = num_cols[:6]  # Fallback: show top 6 columns
+
+    # ── Detect sort intent ─────────────────────────────────────────────────
+    cost_keywords    = ["cost", "expense", "operational", "shipping", "spend"]
+    revenue_keywords = ["revenue", "profit", "income", "sales", "earning"]
+
+    cost_cols    = [c for c in num_cols if any(k in c.lower() for k in cost_keywords)]
+    revenue_cols = [c for c in num_cols if any(k in c.lower() for k in revenue_keywords)]
+
+    # Also check asked_cols for cost/revenue
+    if not cost_cols:
+        cost_cols = [c for c in asked_cols if any(k in c.lower() for k in cost_keywords)]
+    if not revenue_cols:
+        revenue_cols = [c for c in asked_cols if any(k in c.lower() for k in revenue_keywords)]
+
+    wants_highest_cost   = any(w in q for w in ["highest", "most", "largest", "expensive", "high cost"])
+    wants_lowest_revenue = any(w in q for w in ["low revenue", "lowest revenue", "least revenue", "relatively low"])
+
+    # ── Build the answer ───────────────────────────────────────────────────
+    lines = ["**Verified Cluster Analysis (from actual data)**\n"]
+
+    display_cols = list(dict.fromkeys(cost_cols + revenue_cols + asked_cols))[:8]
+    if not display_cols:
+        display_cols = num_cols[:6]
+
+    # Sort clusters by cost desc then revenue asc if applicable
+    if cost_cols and (wants_highest_cost or wants_lowest_revenue):
+        sort_col = cost_cols[0]
+        sorted_labels = profile[sort_col].sort_values(ascending=False).index.tolist()
+        sorted_labels = [l for l in sorted_labels if l >= 0]
+    else:
+        sorted_labels = unique_labels
+
+    for lbl in sorted_labels:
+        if lbl not in profile.index:
+            continue
+        row     = profile.loc[lbl]
+        n_rows  = int(counts.get(lbl, 0))
+        pct     = n_rows / len(df) * 100
+        col_str = " | ".join([f"**{c}**: {fmt(row[c])}" for c in display_cols if c in row.index])
+        lines.append(f"- **Cluster {lbl}** ({n_rows:,} records, {pct:.1f}%): {col_str}")
+
+    # Add interpretation if cost+revenue both present
+    if cost_cols and revenue_cols:
+        lines.append("\n**Interpretation:**")
+        cost_col_name    = cost_cols[0]
+        revenue_col_name = revenue_cols[0]
+        # Find cluster with highest cost
+        top_cost_cluster = profile[cost_col_name].idxmax()
+        # Find cluster with lowest revenue
+        low_rev_cluster  = profile[revenue_col_name].idxmin()
+
+        lines.append(
+            f"- Highest **{cost_col_name}**: Cluster {top_cost_cluster} "
+            f"(avg {fmt(profile.loc[top_cost_cluster, cost_col_name])})"
+        )
+        lines.append(
+            f"- Lowest **{revenue_col_name}**: Cluster {low_rev_cluster} "
+            f"(avg {fmt(profile.loc[low_rev_cluster, revenue_col_name])})"
+        )
+        if top_cost_cluster == low_rev_cluster:
+            lines.append(
+                f"- **Cluster {top_cost_cluster} is the most at-risk**: "
+                f"highest cost AND lowest revenue."
+            )
+        else:
+            lines.append(
+                f"- Cluster {top_cost_cluster} has highest cost. "
+                f"Cluster {low_rev_cluster} has lowest revenue — "
+                f"these are your two highest-risk segments."
+            )
+
+    lines.append("\n*All numbers verified directly from dataset — no estimates.*")
+    return "\n".join(lines)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -334,7 +453,7 @@ def summarise_dataset() -> str:
         for i, col in enumerate(num_cols[:n_num]):
             ax = fig.add_subplot(n_fig, n_num, rc*n_num+i+1)
             d  = df[col].dropna()
-            ax.hist(d, bins=25, color=P[i%len(P)], edgecolor="white", lw=.5, alpha=.9)
+            ax.hist(d, bins=15, color=P[i%len(P)], edgecolor="white", lw=.5, alpha=.9)
             ax.axvline(d.mean(), color=WARN, linestyle="--", lw=1.5, label=f"avg {fmt(d.mean())}")
             chart_style(ax, title=col, xlabel="Value", ylabel="Count")
             ax.legend(fontsize=7, framealpha=.6)
@@ -663,7 +782,7 @@ def run_classification(
 
 
 # ─────────────────────────────────────────────────────────────────
-#  CLUSTERING TOOL 
+#  CLUSTERING TOOL
 # ─────────────────────────────────────────────────────────────────
 
 @tool
@@ -673,13 +792,11 @@ def run_clustering(
     algorithm: str,
 ) -> str:
     """
-    UNSUPERVISED clustering — groups rows WITHOUT a target/label column.
+    UNSUPERVISED clustering -- groups rows WITHOUT a target/label column.
     Produces a PCA scatter plot, cluster size chart, and feature profile heatmap.
     ALWAYS call this (NEVER run_classification) when user mentions:
     KMeans, DBSCAN, cluster, clustering, segment, group, unsupervised,
     find groups, similar records, natural groups, customer segments.
-    MANDATORY: You must call this tool to answer "Can data be grouped?" or "Are there segments?". 
-    Do not guess if segments exist without running this.
 
     Args:
         feature_columns: Comma-separated numeric column names, or 'auto' for all numeric columns.
@@ -690,13 +807,11 @@ def run_clustering(
     if df is None or df.empty:
         return "No dataset loaded. Please upload a CSV file using the sidebar first."
 
-    # Convert n_clusters to int if string/any (prevents Groq schema errors)
     try:
         n_clusters = int(n_clusters)
     except (ValueError, TypeError):
         n_clusters = 0
 
-    # ── Feature selection  ──────────
     num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
     if feature_columns.strip().lower() == "auto":
         feat_cols = [c for c in num_cols if not any(
@@ -712,14 +827,12 @@ def run_clustering(
     if len(feat_cols) < 2:
         return "Clustering needs at least 2 numeric feature columns."
 
-    # ── Preprocess ────────────────────────────────────────────────
     X_imp = SimpleImputer(strategy="mean").fit_transform(df[feat_cols].copy())
     X_sc  = StandardScaler().fit_transform(X_imp)
 
     valid_algos = {"KMeans", "DBSCAN"}
     algorithm   = algorithm if algorithm in valid_algos else "KMeans"
 
-    # ── Auto-select k (KMeans) ────────────────────────────────────
     if algorithm == "KMeans" and n_clusters == 0:
         sil_scores, k_range = [], range(2, min(9, len(df)//5 + 2))
         for k in k_range:
@@ -729,18 +842,14 @@ def run_clustering(
     elif n_clusters < 2:
         n_clusters = 3
 
-    # ── Fit model ─────────────────────────────────────────────────
     if algorithm == "KMeans":
         model  = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
         labels = model.fit_predict(X_sc)
-
     else:
-        # ── DBSCAN auto-eps ────────────────────────────────
         min_samp = max(3, len(df) // 50)
         nn       = NearestNeighbors(n_neighbors=min_samp).fit(X_sc)
         dists, _ = nn.kneighbors(X_sc)
 
-        # percentiles eps
         for pct in [90, 95, 97, 99]:
             eps_try = float(np.percentile(dists[:, -1], pct))
             lbl_try = DBSCAN(eps=eps_try, min_samples=min_samp).fit_predict(X_sc)
@@ -758,17 +867,14 @@ def run_clustering(
                 "Try: 'cluster using KMeans with 3 clusters'"
             )
 
-    # ── Silhouette ────────────────────────────────────────────────
     clean_mask = labels >= 0
     sil = (silhouette_score(X_sc[clean_mask], labels[clean_mask])
            if clean_mask.sum() > 1 and len(set(labels[clean_mask])) > 1 else None)
 
-    # ── PCA ───────────────────────────────────────────────────────
     pca    = PCA(n_components=2, random_state=42)
     coords = pca.fit_transform(X_sc)
     var_ex = pca.explained_variance_ratio_ * 100
 
-    # ── Cluster profiles ──────────────────────────────────────────
     df_prof             = df[feat_cols].copy()
     df_prof["_cluster"] = labels
     profile             = df_prof.groupby("_cluster")[feat_cols].mean()
@@ -779,11 +885,9 @@ def run_clustering(
     cluster_sizes = [int((labels == l).sum()) for l in unique_labels]
     noise_count   = int((labels == -1).sum())
 
-    # ── Figure: 3 panels ─────────────────────────────────────────
     fig = plt.figure(figsize=(17, 11), facecolor="#F2F4F1")
     gs  = gridspec.GridSpec(2, 2, figure=fig, hspace=0.45, wspace=0.38)
 
-    # Panel 1: PCA scatter
     ax_sc = fig.add_subplot(gs[0, 0]); ax_sc.set_facecolor(BG)
     for idx, lbl in enumerate(unique_labels):
         mask = labels == lbl
@@ -803,7 +907,6 @@ def run_clustering(
     ax_sc.legend(fontsize=8, framealpha=0.75)
     ax_sc.grid(visible=True, color=GRID, linestyle="--", alpha=0.5)
 
-    # Panel 2: Cluster sizes
     ax_sz = fig.add_subplot(gs[0, 1]); ax_sz.set_facecolor(BG)
     bars  = ax_sz.bar(cluster_names, cluster_sizes,
                       color=[P[i % len(P)] for i in range(len(cluster_names))],
@@ -819,7 +922,6 @@ def run_clustering(
     chart_style(ax_sz, title="Cluster Sizes", xlabel="Cluster", ylabel="Records")
     ax_sz.set_ylim(0, max(cluster_sizes + [noise_count if noise_count > 0 else 0]) * 1.22)
 
-    # Panel 3: Heatmap
     ax_hm   = fig.add_subplot(gs[1, :]); ax_hm.set_facecolor(BG)
     hm_data = profile_norm.loc[unique_labels]
     cmap_hm = LinearSegmentedColormap.from_list("gn", ["#D8F3DC", "#1B4332"])
@@ -841,11 +943,10 @@ def run_clustering(
     st.session_state["pending_plot"] = fig
     plt.close(fig)
 
-    # Save labels to data so other tools can query by cluster
+    # Save cluster labels to dataframe in session state
     df["_cluster_tag"] = labels
     st.session_state["data"] = df
 
-    # ── Text summary ──────────────────────────────────────────────
     sil_str = f"{sil:.3f}" if sil else "N/A"
     sil_lbl = ("excellent" if sil and sil>.7 else "good" if sil and sil>.5
                else "moderate" if sil and sil>.3 else "weak") if sil else "N/A"
@@ -859,13 +960,14 @@ def run_clustering(
     if noise_count > 0:
         lines.append(f"- Noise points: {noise_count} ({noise_count/len(df)*100:.1f}%)")
 
-    lines.append("\n**Average features per cluster (Direct Answer):**")
+    lines.append("\n**Average features per cluster (Verified):**")
     for lbl in unique_labels:
         means = profile.loc[lbl]
         m_str = " | ".join([f"{c}: **{fmt(means[c])}**" for c in feat_cols[:6]])
         lines.append(f"- **Cluster {lbl}** ({int((labels==lbl).sum()):,} rows): {m_str}")
 
     lines.append("\nCharts: PCA scatter, size bars, and feature profile heatmap.")
+    lines.append("\nYou can now ask follow-up questions like 'which cluster has highest cost?' or 'compare clusters by revenue'.")
     return "\n".join(lines)
 
 
@@ -875,7 +977,9 @@ def answer_data_question(question: str) -> str:
     Answers any factual or exploratory question about the dataset using verified statistics.
     Call this for questions like: how many rows, what columns are there, average of X,
     which column has most nulls, are columns correlated, max/min value of X, data quality.
-    Also use this to check if clustering has already been performed (existence of _cluster_tag).
+    Also call this AFTER clustering to answer: which cluster has highest X, compare clusters,
+    cluster profiles, cluster with most/least Y.
+    NEVER invent numbers. Only report what is computed from the actual data.
 
     Args:
         question: The user's plain-English question about the dataset.
@@ -888,28 +992,73 @@ def answer_data_question(question: str) -> str:
     q     = question.lower()
     rows, ncols = df.shape
 
-    # ── ANTI-HALLUCINATION GUARDRAIL ──────────────────────────────
-    cluster_keywords = ["cluster", "clustering", "segment", "segmentation", "kmeans", "dbscan", "silhouette", "centroid", "group"]
-    if any(kw in q for kw in cluster_keywords) and "_cluster_tag" not in df.columns:
-        return "Clustering has not been performed yet. Please run clustering first."
-
-    # ── Handle cluster-specific questions if labels exist ──────────
-    if "_cluster_tag" in df.columns and any(kw in q for kw in ["cluster", "segment", "group"]):
-        num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    cluster_keywords = ["cluster", "clustering", "segment", "segmentation", "kmeans", "dbscan",
+                        "silhouette", "centroid", "group", "highest cost", "lowest revenue",
+                        "most expensive", "operational cost"]
+    
+    # ── If clustering has been performed, answer directly from data ─────────
+    if "_cluster_tag" in df.columns and any(kw in q for kw in cluster_keywords):
+        num_cols = [c for c in df.select_dtypes(include=[np.number]).columns
+                    if c != "_cluster_tag"]
         tag_col  = "_cluster_tag"
         means    = df.groupby(tag_col)[num_cols].mean()
         counts   = df[tag_col].value_counts()
-        
-        lines = ["Average Values per Cluster (Verified Statistics)"]
-        for lbl in sorted(df[tag_col].unique()):
-            if lbl == -1: continue # skip noise
-            row = means.loc[lbl]
-            # filter for columns mentioned in question or just top ones
-            target_cols = [c for c in num_cols if c.lower() in q] or num_cols[:5]
-            avg_str = " | ".join([f"{c}: **{fmt(row[c])}**" for c in target_cols])
-            lines.append(f"- **Cluster {lbl}** ({counts.get(lbl, 0):,} rows): {avg_str}")
+
+        cost_keywords    = ["cost", "expense", "operational", "shipping", "spend"]
+        revenue_keywords = ["revenue", "profit", "income", "sales", "earning"]
+
+        cost_cols    = [c for c in num_cols if any(k in c.lower() for k in cost_keywords)]
+        revenue_cols = [c for c in num_cols if any(k in c.lower() for k in revenue_keywords)]
+        asked_cols   = [c for c in num_cols if c.lower() in q]
+
+        display_cols = list(dict.fromkeys(cost_cols + revenue_cols + asked_cols))[:8]
+        if not display_cols:
+            display_cols = num_cols[:6]
+
+        unique_labels = sorted([l for l in df[tag_col].unique() if l >= 0])
+
+        # Sort by cost desc if question asks for highest cost
+        if cost_cols and any(w in q for w in ["highest", "most", "largest", "expensive"]):
+            sort_col      = cost_cols[0]
+            unique_labels = means[sort_col].sort_values(ascending=False).index.tolist()
+            unique_labels = [l for l in unique_labels if l >= 0]
+
+        lines = ["**Verified Cluster Statistics (from actual data):**\n"]
+        for lbl in unique_labels:
+            if lbl not in means.index:
+                continue
+            row     = means.loc[lbl]
+            n_rows  = int(counts.get(lbl, 0))
+            pct     = n_rows / len(df) * 100
+            col_str = " | ".join([f"**{c}**: {fmt(row[c])}" for c in display_cols if c in row.index])
+            lines.append(f"- **Cluster {lbl}** ({n_rows:,} records, {pct:.1f}%): {col_str}")
+
+        if cost_cols and revenue_cols:
+            lines.append("\n**Key Findings:**")
+            cost_col_name    = cost_cols[0]
+            revenue_col_name = revenue_cols[0]
+            top_cost_cluster = means[cost_col_name].idxmax()
+            low_rev_cluster  = means[revenue_col_name].idxmin()
+            lines.append(
+                f"- Highest **{cost_col_name}**: Cluster {top_cost_cluster} "
+                f"(avg {fmt(means.loc[top_cost_cluster, cost_col_name])})"
+            )
+            lines.append(
+                f"- Lowest **{revenue_col_name}**: Cluster {low_rev_cluster} "
+                f"(avg {fmt(means.loc[low_rev_cluster, revenue_col_name])})"
+            )
+            if top_cost_cluster == low_rev_cluster:
+                lines.append(
+                    f"- **Cluster {top_cost_cluster} is highest risk**: highest cost AND lowest revenue."
+                )
+        lines.append("\n*Numbers computed directly from dataset.*")
         return "\n".join(lines)
 
+    # ── Clustering not yet run ────────────────────────────────────────────────
+    if any(kw in q for kw in cluster_keywords) and "_cluster_tag" not in df.columns:
+        return "Clustering has not been performed yet. Please run clustering first by clicking 'Cluster' or asking me to 'cluster the data'."
+
+    # ── Standard factual questions ────────────────────────────────────────────
     if any(w in q for w in ["how many rows","row count","number of rows","size"]):
         return f"The dataset has **{rows:,} rows**."
     if any(w in q for w in ["how many columns","column count","number of columns"]):
@@ -987,70 +1136,102 @@ def answer_data_question(question: str) -> str:
 # ─────────────────────────────────────────────────────────────────
 
 CUSTOM_INSTRUCTIONS = """
-SMART DATA ANALYST — STRICT TOOL MODE (v7)
+SMART DATA ANALYST — STRICT ANTI-HALLUCINATION MODE (v10 FIXED)
 
-ROLE:
-You are a senior professional data analyst operating in STRICT DECISION MODE.
-You must answer ONLY using verified computed results from the available tools in this app.
-If you cannot compute the requested metric using the tools, you must not guess.
+ROLE: Senior data analyst. Answer ONLY using verified tool outputs. NEVER invent numbers.
 
-AVAILABLE TOOLS (YOU MUST USE THEM):
-- summarise_dataset()        -> overview / describe / profile / explore data
-- analyse_time_series(...)   -> trends over time / seasonality / changes over time
-- run_classification(...)    -> classify / predict labels (supervised)
-- run_clustering(...)        -> cluster / segment / group (unsupervised)
-- answer_data_question(...)  -> factual stats (counts, missing, max/min, mean, correlations, cluster means)
+TOOLS (MUST USE — NEVER SKIP):
+- summarise_dataset()        -> overview / describe dataset
+- analyse_time_series(...)   -> trends over time
+- run_classification(...)    -> supervised ML prediction
+- run_clustering(...)        -> unsupervised clustering/segmentation
+- answer_data_question(...)  -> factual answers, post-clustering analysis
 
-ABSOLUTE RULES (NON-NEGOTIABLE):
-1) TOOLS-FIRST: For ANY user question, you MUST call the correct tool BEFORE answering. You are NOT allowed to answer directly from general knowledge or assumptions. 
-2) NO HALLUCINATION: NEVER invent numbers, clusters, values, tables, thresholds, SQL, or “example outputs”.
-3) FORBIDDEN CONTENT: No SQL, no pseudo-code, no “I will assume…”, no methodology explanations, no teaching, no hypothetical examples.
-4) REQUIRED FALLBACK SENTENCES:
-   A) If clustering required but not performed: "Clustering has not been performed yet. Please run clustering first."
-   B) If metric/column missing: "The required metric is not available in the computed results."
+══════════════════════════════════════════════════════════════
+ABSOLUTE ANTI-HALLUCINATION RULES — NON-NEGOTIABLE:
+══════════════════════════════════════════════════════════════
+1. NEVER write SQL queries. You cannot execute SQL. Do not pretend you can.
+2. NEVER invent numbers, cluster names, values, or results not from a tool.
+3. NEVER say "Cluster A", "Cluster B", "100,000", or any made-up names/numbers.
+4. If you do not have tool output, say "I need to run the tool first" and call it.
+5. ALWAYS call a tool FIRST before writing any answer.
+6. For post-clustering questions: call answer_data_question(question) — it reads real data.
 
-MANDATORY TOOL ROUTING:
-A) CLUSTERING (SEGMENTS/GROUPS): Use run_clustering() for any question about "natural groups" or "can data be grouped".
-B) CLUSTER COMPARISONS: Use answer_data_question() ONLY IF "_cluster_tag" already exists. Otherwise use fallback A.
-C) TIME/TRENDS: Use analyse_time_series(time_column="auto", target_column="auto", frequency="M", aggregation="mean") unless specified.
-D) CLASSIFICATION: Use run_classification(target_column="auto", feature_columns="auto", model_name="RandomForest") unless specified.
+══════════════════════════════════════════════════════════════
+ROUTING RULES:
+══════════════════════════════════════════════════════════════
+- CLUSTER/SEGMENT question (first time)  → call run_clustering() immediately
+- POST-CLUSTERING follow-up question     → call answer_data_question(question)
+- DATA QUALITY / STATS question          → call answer_data_question(question)
+- TREND question                         → call analyse_time_series(...)
+- PREDICT / CLASSIFY question            → call run_classification(...)
+- OVERVIEW question                      → call summarise_dataset()
 
-SPECIAL CASE: “HIGH OPERATIONAL COST + LOW REVENUE”:
-1) Confirm "_cluster_tag" exists. If not, return fallback A.
-2) Identify cost and revenue columns (must contain "cost" and "revenue" or "sales").
-3) Compare cluster means for BOTH. Rank by high cost + low revenue.
-4) If columns not found, return fallback B.
-
-OUTPUT STYLE (STRICT):
-- 3–6 sentences maximum. Direct conclusion first.
-- Mention numeric evidence ONLY if it appears in tool results. No emojis.
-- End ALL analytical answers with EXACTLY: "For more details, refer to the Direct Answer and Charts above."
+══════════════════════════════════════════════════════════════
+OUTPUT FORMAT:
+══════════════════════════════════════════════════════════════
+- Direct conclusion first. Numeric evidence only from tools.
+- 3-5 sentences max. No SQL. No fictional data. No filler text.
 """
 
 
-@st.cache_resource
 def get_agent(model_id: str, api_key: str) -> ToolCallingAgent:
-    llm = LiteLLMModel(model_id=model_id, api_key=api_key, temperature=0.1, request_timeout=40)
+    llm = LiteLLMModel(model_id=model_id, api_key=api_key, temperature=0, request_timeout=40)
     return ToolCallingAgent(
         tools=[summarise_dataset, analyse_time_series, run_classification,
                run_clustering, answer_data_question],
         model=llm,
         instructions=CUSTOM_INSTRUCTIONS,
-        max_steps=3,
+        max_steps=2,
     )
 
 
 def run_agent(prompt: str, model_id: str, api_key: str) -> str:
     import litellm
+
+    # ══════════════════════════════════════════════════════════════
+    # *** PRE-ROUTING: Handle cluster follow-up BEFORE calling LLM ***
+    # This completely bypasses the LLM for follow-up cluster questions,
+    # preventing hallucination entirely.
+    # ══════════════════════════════════════════════════════════════
+    direct_answer = direct_cluster_analysis(prompt)
+    if direct_answer is not None:
+        return direct_answer
+
+    # ── Normal agent flow for everything else ─────────────────────
     max_retries = 1
     for attempt in range(max_retries + 1):
         try:
-            # Overriding model to 8B for maximum speed
             fast_model = "groq/llama-3.1-8b-instant"
             agent = get_agent(fast_model, api_key)
             st.session_state["pending_plot"] = None
             raw = agent.run(prompt)
-            return clean_output(str(raw))
+            result = clean_output(str(raw))
+
+            # ── Post-generation hallucination safety net ───────────────────
+            # If the model generated fake SQL or fictional data, intercept it
+            hallucination_signals = [
+                "select *", "from table", "order by", "limit 10",
+                "cluster a:", "cluster b:", "cluster c:",
+                "fictional", "for demonstration", "hypothetical",
+                "$100,000", "$90,000", "$80,000",  # common hallucinated numbers
+            ]
+            result_lower = result.lower()
+            if any(sig in result_lower for sig in hallucination_signals):
+                # Try to recover via direct tool call
+                df = st.session_state.get("data")
+                if df is not None and "_cluster_tag" in df.columns:
+                    fallback = direct_cluster_analysis(prompt)
+                    if fallback:
+                        return fallback
+                return (
+                    "I need to compute the answer from your data. "
+                    "Please click the 'Cluster' button first to run clustering, "
+                    "then ask your follow-up question."
+                )
+
+            return result
+
         except litellm.RateLimitError as e:
             wm = re.search(r"try again in (\d+(?:\.\d+)?)s", str(e))
             ws = int(float(wm.group(1))) + 3 if wm else 35
@@ -1061,9 +1242,10 @@ def run_agent(prompt: str, model_id: str, api_key: str) -> str:
                         "or switch to a different model in the sidebar.")
         except Exception as e:
             err = repr(e) + str(e)
-            if any(x in err.lower() for x in ["tool_use_failed", "failed_generation", "litellm.badrequesterror", "groqexception"]):
-                return ("Analysis complete! (Note: The detailed text summary was cut off by the AI size limit, "
-                        "but you can view all the charts and metrics generated above.)")
+            if any(x in err.lower() for x in ["tool_use_failed", "failed_generation",
+                                               "litellm.badrequesterror", "groqexception"]):
+                return ("Analysis complete! (Note: The detailed text summary was cut off by the AI "
+                        "size limit, but you can view all the charts and metrics generated above.)")
             if "charmap" in err.lower() or "codec" in err.lower():
                 return "WARNING: A text encoding error occurred. Please try again."
             return f"WARNING: Error: {err[:500]}"
@@ -1109,9 +1291,9 @@ with st.sidebar:
                         "Ask me anything! For example:\n"
                         "- \"Summarise the dataset\"\n"
                         "- \"Analyse trends over time\"\n"
-                        "- \"Run a classification analysis (supervised learning, predict labels)\"\n"
-                        "- \"Cluster the data (KMeans, DBSCAN, segment, unsupervised)\"\n"
-                        "- \"How many missing values are there?\""
+                        "- \"Run a classification analysis\"\n"
+                        "- \"Cluster the data (KMeans, DBSCAN, segment)\"\n"
+                        "- \"Which clusters have highest cost and lowest revenue?\""
                     ),
                     "plot": None,
                 }],
@@ -1231,7 +1413,7 @@ if st.session_state["data"] is None:
     Then type anything in the chat &mdash; like:<br>
     <em>"summarise the data"</em> &middot; <em>"show trends"</em> &middot;
     <em>"classify the target"</em> &middot; <em>"cluster into 3 groups"</em> &middot;
-    <em>"how many missing values?"</em>
+    <em>"which clusters have highest cost and lowest revenue?"</em>
     </p>
     </div>""", unsafe_allow_html=True)
     st.stop()
@@ -1296,7 +1478,7 @@ with st.form("chat_form", clear_on_submit=True):
     col_in, col_btn = st.columns([6, 1])
     user_text   = col_in.text_input(
         "msg",
-        placeholder="e.g. 'cluster into 3 groups', 'classify order_status', 'show revenue trends'",
+        placeholder="e.g. 'cluster into 3 groups', 'which clusters have highest cost and lowest revenue?', 'show revenue trends'",
         label_visibility="collapsed",
     )
     send_clicked = col_btn.form_submit_button("Send")

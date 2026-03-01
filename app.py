@@ -229,8 +229,9 @@ def build_data_context(df: pd.DataFrame) -> str:
             f"mean={fmt(s.mean())} median={fmt(s.median())} "
             f"std={fmt(s.std())} missing={df[col].isnull().mean()*100:.1f}%"
         )
-    for col in cat_cols:
-        top5 = ", ".join(f"'{v}'({c})" for v, c in df[col].value_counts().head(5).items())
+    for col in cat_cols[:10]:
+        val_counts = df[col].value_counts()
+        top5 = ", ".join(f"'{v}'({c})" for v, c in val_counts.head(5).items())
         lines.append(
             f"[CAT] {col}: {df[col].nunique()} unique | top: {top5} | "
             f"missing={df[col].isnull().mean()*100:.1f}%"
@@ -244,9 +245,10 @@ def build_data_context(df: pd.DataFrame) -> str:
             )
         except Exception:
             pass
-    if len(num_cols) >= 2:
+    if len(num_cols) >= 2 and len(num_cols) < 50:
         try:
-            corr = df[num_cols].corr().abs()
+            sample_df = df if len(df) < 5000 else df.sample(5000, random_state=42)
+            corr = sample_df[num_cols].corr().abs()
             pairs = (
                 corr.where(np.triu(np.ones(corr.shape), k=1).astype(bool))
                 .stack().sort_values(ascending=False).head(5)
@@ -889,13 +891,7 @@ def answer_data_question(question: str) -> str:
     # ── ANTI-HALLUCINATION GUARDRAIL ──────────────────────────────
     cluster_keywords = ["cluster", "clustering", "segment", "segmentation", "kmeans", "dbscan", "silhouette", "centroid", "group"]
     if any(kw in q for kw in cluster_keywords) and "_cluster_tag" not in df.columns:
-        return (
-            "Clustering has not been performed yet (no `_cluster_tag` column found). "
-            "I cannot provide cluster metrics or averages until the data is segmented.\n\n"
-            "**Please run clustering first.** For example, type:\n"
-            "- *'Cluster the data into 3 groups using KMeans'* \n"
-            "- *'Run DBSCAN clustering feature1, feature2'*"
-        )
+        return "Clustering has not been performed yet. Please run clustering first."
 
     # ── Handle cluster-specific questions if labels exist ──────────
     if "_cluster_tag" in df.columns and any(kw in q for kw in ["cluster", "segment", "group"]):
@@ -991,60 +987,67 @@ def answer_data_question(question: str) -> str:
 # ─────────────────────────────────────────────────────────────────
 
 CUSTOM_INSTRUCTIONS = """
-You are a senior professional data analyst embedded inside this application. 
-Your role is to provide structured, analytical, data-driven answers based strictly on computed results.
+SMART DATA ANALYST — STRICT TOOL MODE (v7)
 
-HOW TO CHOOSE A TOOL:
-- summarise_dataset()        -> overview, summary, describe, explore, profile data
-- analyse_time_series(...)   -> trends, time patterns, changes over time
-- run_classification(...)    -> classify, predict, supervised, train model, labels, target column
-- run_clustering(...)        -> cluster, KMeans, DBSCAN, segment, group, unsupervised
-- answer_data_question(...)  -> factual stats: rows, columns, missing, averages, correlations
+ROLE:
+You are a senior professional data analyst operating in STRICT DECISION MODE.
+You must answer ONLY using verified computed results from the available tools in this app.
+If you cannot compute the requested metric using the tools, you must not guess.
 
-MANDATORY EXECUTION RULES:
-1. ALWAYS call a tool before answering. Never respond based on assumptions or internal knowledge.
-2. VERIFY CLUSTERING: Never mention segments or silhouette scores unless a tool was just executed in this turn.
-3. PROFESSIONAL TONE: No emojis, no casual language, no vague statements. Use bullet points for key metrics.
-4. Base all answers strictly on the Observation provided by the tool.
+AVAILABLE TOOLS (YOU MUST USE THEM):
+- summarise_dataset()        -> overview / describe / profile / explore data
+- analyse_time_series(...)   -> trends over time / seasonality / changes over time
+- run_classification(...)    -> classify / predict labels (supervised)
+- run_clustering(...)        -> cluster / segment / group (unsupervised)
+- answer_data_question(...)  -> factual stats (counts, missing, max/min, mean, correlations, cluster means)
 
-STRICT RESPONSE STRUCTURES:
+ABSOLUTE RULES (NON-NEGOTIABLE):
+1) TOOLS-FIRST: For ANY user question, you MUST call the correct tool BEFORE answering. You are NOT allowed to answer directly from general knowledge or assumptions. 
+2) NO HALLUCINATION: NEVER invent numbers, clusters, values, tables, thresholds, SQL, or “example outputs”.
+3) FORBIDDEN CONTENT: No SQL, no pseudo-code, no “I will assume…”, no methodology explanations, no teaching, no hypothetical examples.
+4) REQUIRED FALLBACK SENTENCES:
+   A) If clustering required but not performed: "Clustering has not been performed yet. Please run clustering first."
+   B) If metric/column missing: "The required metric is not available in the computed results."
 
-FOR CLUSTERING / SEGMENTATION:
-- Start with: "Yes, customers can be grouped into [X] distinct segments using [algorithm]..."
-- Mandatory Metrics: Report Algorithm, Cluster Count, Silhouette Score, and Interpretation (<0.2=weak, 0.2-0.4=moderate, >0.4=strong).
-- Analysis: State if sizes are balanced and if feature averages differ meaningfully across groups.
-- End with: "For more details, refer to the Direct Answer and Charts above."
+MANDATORY TOOL ROUTING:
+A) CLUSTERING (SEGMENTS/GROUPS): Use run_clustering() for any question about "natural groups" or "can data be grouped".
+B) CLUSTER COMPARISONS: Use answer_data_question() ONLY IF "_cluster_tag" already exists. Otherwise use fallback A.
+C) TIME/TRENDS: Use analyse_time_series(time_column="auto", target_column="auto", frequency="M", aggregation="mean") unless specified.
+D) CLASSIFICATION: Use run_classification(target_column="auto", feature_columns="auto", model_name="RandomForest") unless specified.
 
-FOR CLASSIFICATION:
-- Mention: Model used, Accuracy, F1-scores, and whether performance is strong or weak.
+SPECIAL CASE: “HIGH OPERATIONAL COST + LOW REVENUE”:
+1) Confirm "_cluster_tag" exists. If not, return fallback A.
+2) Identify cost and revenue columns (must contain "cost" and "revenue" or "sales").
+3) Compare cluster means for BOTH. Rank by high cost + low revenue.
+4) If columns not found, return fallback B.
 
-FOR CORRELATIONS:
-- Mention: Correlation coefficient values (r), strongest relationships, and interpret strength.
-
-FOR TRENDS:
-- Mention: Direction (increasing/decreasing/flat), peaks, dips, volatility, and time period.
-
-Keep final_answer concise but highly analytical (3–6 sentences).
+OUTPUT STYLE (STRICT):
+- 3–6 sentences maximum. Direct conclusion first.
+- Mention numeric evidence ONLY if it appears in tool results. No emojis.
+- End ALL analytical answers with EXACTLY: "For more details, refer to the Direct Answer and Charts above."
 """
 
 
-def make_agent(model_id: str, api_key: str) -> ToolCallingAgent:
-    llm = LiteLLMModel(model_id=model_id, api_key=api_key, temperature=0.1)
+@st.cache_resource
+def get_agent(model_id: str, api_key: str) -> ToolCallingAgent:
+    llm = LiteLLMModel(model_id=model_id, api_key=api_key, temperature=0.1, request_timeout=40)
     return ToolCallingAgent(
         tools=[summarise_dataset, analyse_time_series, run_classification,
                run_clustering, answer_data_question],
         model=llm,
         instructions=CUSTOM_INSTRUCTIONS,
-        max_steps=4,
+        max_steps=3,
     )
 
 
 def run_agent(prompt: str, model_id: str, api_key: str) -> str:
     import litellm
-    max_retries = 2
+    max_retries = 1
     for attempt in range(max_retries + 1):
         try:
-            agent = make_agent(model_id, api_key)
+            # Overriding model to 8B for maximum speed
+            fast_model = "groq/llama-3.1-8b-instant"
+            agent = get_agent(fast_model, api_key)
             st.session_state["pending_plot"] = None
             raw = agent.run(prompt)
             return clean_output(str(raw))
@@ -1163,7 +1166,7 @@ with st.sidebar:
             "Llama 3.3 70B -- Smartest": "groq/llama-3.3-70b-versatile",
             "Llama 3.1 8B -- Fastest":  "groq/llama-3.1-8b-instant",
         }
-        sel_model    = st.selectbox("", list(model_opts.keys()), index=0,
+        sel_model    = st.selectbox("", list(model_opts.keys()), index=1,
                                      label_visibility="collapsed", key="ai_model")
         sel_model_id = model_opts[sel_model]
         st.divider()
